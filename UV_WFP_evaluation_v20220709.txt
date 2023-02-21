@@ -1,0 +1,442 @@
+group = [PUR/MUF]
+input = "path/IMAGES_RAW/PUR/";
+output = "path/IMAGES_MASKED/PUR/";
+output_summary = "path/";
+scale_dist_mm = 49.9;
+
+close("*"); // close open windows
+
+
+Table.create("summary");
+list = getFileList(input);
+
+for (i = 0; i < list.length; i++){ // sample / image loop
+        action(input, output, list[i],i);
+}
+
+//After Sample loop:
+getDateAndTime(year, month, dayOfWeek, dayOfMonth, hour, minute, second, msec);
+selectWindow("summary"); 
+saveAs("Results", output_summary + group+"_summary__"+year+"_"+(month+1)+"_"+dayOfMonth+"_"+hour+"_"+minute+".csv");
+///////
+
+
+//###FUNCTION FOR SAMPLE LOOP: ###
+
+function action(input, output, filename,k) {
+open(input + filename);
+
+//MASKING SETTINGS
+HUEmin= [SET VALUE];
+HUEmax=[SET VALUE];
+HUEtype="pass";
+SATmin=[SET VALUE];
+SATmax=[SET VALUE];
+SATtype="pass";
+BRIGHTmin=[SET VALUE]; 
+BRIGHTmax=[SET VALUE];
+BRIGHTtype="pass";
+
+//DEFINE RECTANGLE ROI (overlap areas stacked vertically)
+Overlap_X = 9.5; //mm
+
+print("running: "+filename);
+raw_width=Image.width;
+raw_height=Image.height;
+
+run("Median...", "radius=1"); //remove CCD noise
+run("Duplicate...", " "); 
+rename("original_raw");
+
+run("Duplicate...", " "); 
+rename("markings");
+
+// FIND GREEN MARKS FOR SCALING ROTATION AND POSITIONING : Color Thresholding // 
+min=newArray(3);
+max=newArray(3);
+filter=newArray(3);
+a=getTitle();
+run("HSB Stack");
+run("Convert Stack to Images");
+selectWindow("Hue");
+rename("0");
+selectWindow("Saturation");
+rename("1");
+selectWindow("Brightness");
+rename("2");
+min[0]=80; 
+max[0]=130;  
+filter[0]="pass";
+min[1]=0;
+max[1]=255;
+filter[1]="pass";
+min[2]=75;
+max[2]=255;
+filter[2]="pass";
+for (i=0;i<3;i++){
+  selectWindow(""+i);
+  setThreshold(min[i], max[i]);
+  run("Convert to Mask");
+  if (filter[i]=="stop")  run("Invert");
+}
+imageCalculator("AND create", "0","1");
+imageCalculator("AND create", "Result of 0","2");
+for (i=0;i<3;i++){
+  selectWindow(""+i);
+  close();
+}
+selectWindow("Result of 0");
+close();
+selectWindow("Result of Result of 0");
+rename(a);
+
+
+run("Fill Holes");
+run("Invert");
+run("Fill Holes");
+run("Invert");//leaves only the objects at the edge (green marks)
+run("Median...", "radius=5");
+
+
+// FIND COORDINATES TO SCALE, ROTATE AND CUT
+measure_dist = 10; //measuring distance from image edge in px
+makeLine(0, measure_dist, raw_width, measure_dist);
+run("Plot Profile");
+run("Find Peaks", "min._peak_amplitude=50 min._peak_distance=0 min._value=NaN max._value=NaN list");
+mark_L_X = Table.get("X1", 1);
+mark_C_X = (raw_width-(2*(raw_width-Table.get("X1", 0))));
+selectWindow("Plot Values");
+run("Close");
+close();close();
+run("Rotate 90 Degrees Left");
+makeLine(0, measure_dist, raw_height, measure_dist);
+run("Plot Profile");
+run("Find Peaks", "min._peak_amplitude=50 min._peak_distance=0 min._value=NaN max._value=NaN list");
+mark_C_Y = 2*Table.get("X1", 1);
+mark_U_Y= Table.get("X1", 0);
+selectWindow("Plot Values");
+run("Close");
+close();close();
+run("Rotate 90 Degrees Right");
+makeLine(0, mark_U_Y, raw_width, mark_U_Y);
+run("Plot Profile");
+run("Find Peaks", "min._peak_amplitude=50 min._peak_distance=0 min._value=NaN max._value=NaN list");
+mark_U_X = (raw_width-(2*(raw_width-Table.get("X1", 0))));
+selectWindow("Plot Values");
+run("Close");
+close();close();
+
+
+rotate_deg = Math.atan((mark_U_X - mark_C_X)/(mark_U_Y - mark_C_Y))*180/PI;
+
+
+run("Rotate... ", "angle=&rotate_deg grid=10 interpolation=Bilinear fill");//rotate markings image to find new positions:
+makeLine(0, mark_C_Y/2, raw_width, mark_C_Y/2);
+run("Plot Profile");
+run("Find Peaks", "min._peak_amplitude=50 min._peak_distance=0 min._value=NaN max._value=NaN list");
+mark_L_X = Table.get("X1", 1); // UPDATE LEFT MARK X POSITION AFTER ROTATION
+mark_C_X = (raw_width-(2*(raw_width-Table.get("X1", 0)))); // UPDATE CORNER MARK X POSITION AFTER ROTATION
+selectWindow("Plot Values");
+run("Close");
+close();close();
+run("Rotate 90 Degrees Left");
+makeLine(0, (raw_width-mark_C_X)/2, raw_height, (raw_width-mark_C_X)/2);
+run("Plot Profile");
+run("Find Peaks", "min._peak_amplitude=50 min._peak_distance=0 min._value=NaN max._value=NaN list");
+mark_C_Y = 2*Table.get("X1", 1); // UPDATE CORNER MARK Y POSITION AFTER ROTATION
+
+selectWindow("Plot Values");
+run("Close");
+close();close();
+run("Rotate 90 Degrees Right");
+
+
+scale_dist_px = mark_C_X-mark_L_X;
+scale_factor = scale_dist_px/scale_dist_mm;
+
+
+
+//TRANSFORM BEFORE CROPPING TO OVERLAP AREA
+selectWindow(filename); // transform image according to mark positions
+run("Set Scale...", "distance=&scale_dist_px known=&scale_dist_mm unit=mm");
+run("Rotate... ", "angle=&rotate_deg grid=10 interpolation=Bilinear");
+
+run("Enhance Local Contrast (CLAHE)", 
+"blocksize=1224 histogram=256 maximum=3 mask=*None* fast_(less_accurate)");
+
+
+ROI_W= Overlap_X*scale_factor;  // WIDTH of overlap area (IN PIXELS)
+ROI_X= mark_C_X - ROI_W; // X Coordinate of LEFT position of rectangle  (IN PIXELS)
+
+
+makeRectangle(ROI_X, 0, ROI_W, raw_height);
+run("Crop");
+
+run("Duplicate...", " "); // 
+rename("original");
+selectWindow(filename); // 
+
+
+//IMAGE ADJUSTMENTS BEFORE MAKING BINARY: 
+run("Despeckle");
+
+
+//MEASURE GAP BETWEEN SAMPLE SIDES
+run("Duplicate...", " "); // 
+rename("gapfinder");
+run("8-bit");
+run("Invert");
+run("Enhance Local Contrast (CLAHE)", "blocksize=124 histogram=256 maximum=3 mask=*None* fast_(less_accurate)");
+run("Rotate 90 Degrees Left");
+run("Select All");
+
+run("Plot Profile");
+run("Find Peaks", "min._peak_amplitude=10 min._peak_distance=800 min._value=NaN max._value=NaN exclude list");
+
+
+selectWindow("Plot Values"); // 
+profile_inv_position = Table.getColumn("X0");
+profile_inv_gray = Table.getColumn("Y0");
+Array.sort(profile_inv_gray);
+median_inv_gray = profile_inv_gray[lengthOf(profile_inv_gray)/2] ;
+profile_inv_gray = Table.getColumn("Y0");//reimport gray values unsorted
+gap_middle_Y = Table.get("X1", 0); // 
+maximum_gray_inv = Table.get("Y1", 0); // 
+minimum_gray_inv = Table.get("Y2", 0); // 
+treshold_gray_inv = (255+median_inv_gray)/2; //average between minimum and 255(white)
+//print(treshold_gray_inv);
+
+treshold_positions = newArray(0);
+	j=0;
+	for (i = 0; i < (lengthOf(profile_inv_gray)-1); i++){
+		
+		     if((profile_inv_gray[i+1]>treshold_gray_inv)||(profile_inv_gray[i]>treshold_gray_inv)) { // XOR construct:
+		     	 
+		     	 if((profile_inv_gray[i+1]<treshold_gray_inv)||(profile_inv_gray[i]<treshold_gray_inv)){
+		     	 	treshold_positions[j] = profile_inv_position[i];
+		     	 	j=j+1;
+		     	 	}}}
+	Array.show("treshold_positions for sample position and gap", treshold_positions);
+
+
+ if (maximum_gray_inv>treshold_gray_inv){
+
+	//print("gap found!");
+	if(lengthOf(treshold_positions)==4){
+		//print("number of thresholds OK");
+	
+	gap_width = treshold_positions[2]-treshold_positions[1]; // in mm
+	sample_width = ((treshold_positions[1]-treshold_positions[0])+(treshold_positions[1]-treshold_positions[0]))/2; // in mm	
+	
+	ROI_1_Y = round(treshold_positions[0]*scale_factor); // in px
+	ROI_1_H = round((treshold_positions[1]-treshold_positions[0])*scale_factor); // in px
+	ROI_2_Y = round(treshold_positions[2]*scale_factor); // in px
+	ROI_2_H = round((treshold_positions[3]-treshold_positions[2])*scale_factor); // in px
+     }else{//use only first and last threshold position if number of thresholds unexpected:
+    gap_width = 0;
+	sample_width= (treshold_positions[lengthOf(treshold_positions)-1]-treshold_positions[0])/2; // in mm
+    ROI_1_Y = round(treshold_positions[0]*scale_factor); // in px
+	ROI_1_H = round(((treshold_positions[lengthOf(treshold_positions)-1]-treshold_positions[0])/2)*scale_factor); // in px
+	ROI_2_Y = round((treshold_positions[0]+(treshold_positions[lengthOf(treshold_positions)-1]-treshold_positions[0])/2)*scale_factor); // in px
+	ROI_2_H = round(((treshold_positions[lengthOf(treshold_positions)-1]-treshold_positions[0])/2)*scale_factor); // in px	
+    	
+     }
+
+  }else{
+
+	//print("gap not found!");
+	if(lengthOf(treshold_positions)==2){
+		//print("number of thresholds OK");	
+	
+	gap_width = 0; // in mm	
+	sample_width= (treshold_positions[1]-treshold_positions[0])/2; // in mm
+	
+	ROI_1_Y = round(treshold_positions[0]*scale_factor); // in px
+	ROI_1_H = round(((treshold_positions[1]-treshold_positions[0])/2)*scale_factor); // in px
+	ROI_2_Y = round((treshold_positions[0]+(treshold_positions[1]-treshold_positions[0])/2)*scale_factor); // in px
+	ROI_2_H = round(((treshold_positions[1]-treshold_positions[0])/2)*scale_factor); // in px
+	}else{ //use only first and last threshold position if number of thresholds unexpected:
+    gap_width = 0;
+	sample_width= (treshold_positions[lengthOf(treshold_positions)-1]-treshold_positions[0])/2; // in mm
+	ROI_1_Y = round(treshold_positions[0]*scale_factor); // in px
+	ROI_1_H = round(((treshold_positions[lengthOf(treshold_positions)-1]-treshold_positions[0])/2)*scale_factor); // in px
+	ROI_2_Y = round((treshold_positions[0]+(treshold_positions[lengthOf(treshold_positions)-1]-treshold_positions[0])/2)*scale_factor); // in px
+	ROI_2_H = round(((treshold_positions[lengthOf(treshold_positions)-1]-treshold_positions[0])/2)*scale_factor); // in px	
+    }
+	
+  }
+  close("Plot Values");
+
+
+selectWindow(filename); // 
+// Color Thresholder 2.3.0/1.53q
+// Autogenerated macro, single images only!
+min=newArray(3);
+max=newArray(3);
+filter=newArray(3);
+a=getTitle();
+run("HSB Stack");
+run("Convert Stack to Images");
+selectWindow("Hue");
+rename("0");
+selectWindow("Saturation");
+rename("1");
+selectWindow("Brightness");
+rename("2");
+
+min[0]=HUEmin;
+max[0]=HUEmax;
+filter[0]=HUEtype;
+min[1]=SATmin;
+max[1]=SATmax;
+filter[1]=SATtype;
+min[2]=BRIGHTmin;
+max[2]=BRIGHTmax;
+filter[2]=BRIGHTtype;
+
+for (i=0;i<3;i++){
+  selectWindow(""+i);
+  setThreshold(min[i], max[i]);
+  run("Convert to Mask");
+  if (filter[i]=="stop")  run("Invert");
+}
+imageCalculator("AND create", "0","1");
+imageCalculator("AND create", "Result of 0","2");
+for (i=0;i<3;i++){
+  selectWindow(""+i);
+  close();
+}
+selectWindow("Result of 0");
+close();
+selectWindow("Result of Result of 0");
+rename(a);
+
+// END Colour Thresholding-------------
+
+run("Median...", "radius=3");
+
+
+
+
+
+//Get sub-images for both sides of sample
+rename("original_masked");
+selectWindow("original_masked");
+makeRectangle(0, ROI_1_Y, ROI_W, ROI_1_H); //select area for board 1
+run("Duplicate...", " "); // get overlap area of board 1 
+rename("board1_masked");
+
+
+
+selectWindow("original_masked"); 
+makeRectangle(0, ROI_2_Y, ROI_W, ROI_2_H); //select area for board 1
+run("Duplicate...", " ");// get overlap area of board 2 
+rename("board2_masked");
+run("Flip Horizontally");
+
+
+
+//Get failure images (ADH / COH / WF)
+imageCalculator("AND create", "board1_masked","board2_masked"); //area with adhesive on both sides (cohesive failure adhesive)
+selectWindow("Result of board1_masked");
+rename("boards_CohesiveFailure");
+
+imageCalculator("XOR create", "board1_masked","board2_masked"); //area with adhesive on only 1side (adhesive failure adhesive)
+selectWindow("Result of board1_masked");
+rename("boards_AdhesiveFailure");
+
+imageCalculator("OR create", "board1_masked","board2_masked");
+selectWindow("Result of board1_masked");
+run("Invert");//area with adhesive on NO side (cohesive failure wood (WOOD FAILURE))
+rename("boards_WoodFailure");
+
+
+//take measurements of area fractions
+selectWindow("boards_CohesiveFailure"); 
+run("Set Measurements...", "area area_fraction redirect=None decimal=3");
+run("Measure");
+CohesiveFailure = getResult("%Area", 0);
+run("Clear Results");
+
+selectWindow("boards_AdhesiveFailure"); 
+run("Set Measurements...", "area area_fraction redirect=None decimal=3");
+run("Measure");
+AdhesiveFailure = getResult("%Area", 0);
+run("Clear Results");
+
+selectWindow("boards_WoodFailure"); 
+run("Set Measurements...", "area area_fraction redirect=None decimal=3");
+run("Measure");
+WoodFailure = getResult("%Area", 0);
+run("Clear Results");
+
+
+//WRITE RESULTS to custom table
+selectWindow("summary"); 
+Table.set("sample", k, substring(filename, 0, lengthOf(filename)-4));
+
+Table.set("DEBUG__rotation_deg", k, rotate_deg);
+Table.set("DEBUG__scale_factor", k, scale_factor);
+Table.set("DEBUG__number_of_theshold_positions", k, lengthOf(treshold_positions));
+
+Table.set("CohesiveFailure", k, CohesiveFailure);
+Table.set("AdhesiveFailure", k, AdhesiveFailure);
+Table.set("WoodFailure", k, WoodFailure);
+
+Table.set("sample_width", k, sample_width);
+Table.set("gap_width", k, gap_width);
+Table.update
+
+
+//GENERATE OVERLAY VISUALIZATION
+selectWindow("boards_CohesiveFailure"); 
+run("Invert");
+run("RGB Color");
+setMinAndMax(255, 255, 1);//white-to-yellow
+selectWindow("boards_AdhesiveFailure");
+run("Invert");
+run("RGB Color");
+setMinAndMax(255, 255, 3);//white-to-red
+
+//setMinAndMax(255, 255, 2);//white-to-magenta
+//setMinAndMax(255, 255, 4);//white-to-cyan
+//setMinAndMax(255, 255, 5);//white-to-green
+//setMinAndMax(255, 255, 6);//white-to-blue
+
+selectWindow("original_raw"); 
+run("Duplicate...", " "); // get overlap area of board 1 
+rename("overlay");
+run("Set Scale...", "distance=&scale_dist_px known=&scale_dist_mm unit=mm");
+run("Rotate... ", "angle=&rotate_deg grid=10 interpolation=Bilinear");
+//run("Add Image...", "image=boards_WoodFailure x=&ROI_X y=&ROI_Y opacity=25 zero");
+run("Add Image...", "image=boards_CohesiveFailure x=&ROI_X y=&ROI_1_Y opacity=100 zero");
+run("Add Image...", "image=boards_AdhesiveFailure x=&ROI_X y=&ROI_1_Y opacity=100 zero");
+selectWindow("boards_CohesiveFailure");
+run("Flip Horizontally");
+selectWindow("boards_AdhesiveFailure");
+run("Flip Horizontally");
+selectWindow("overlay"); 
+run("Add Image...", "image=boards_CohesiveFailure x=&ROI_X y=&ROI_2_Y opacity=100 zero");
+run("Add Image...", "image=boards_AdhesiveFailure x=&ROI_X y=&ROI_2_Y opacity=100 zero");
+x_1=(ROI_X - ROI_W - 200);
+run("Add Image...", "image=original x=&x_1 y=0 opacity=100 zero");
+
+//Mark ROIs
+makeRectangle(ROI_X, ROI_1_Y, ROI_W, ROI_1_H);
+setForegroundColor(255, 0, 0);
+run("Draw", "slice");
+makeRectangle(ROI_X, ROI_2_Y, ROI_W, ROI_2_H);
+run("Draw", "slice");
+run("Select None");
+//save processed image visualization
+saveAs("Jpeg", output + filename);
+
+
+//CLOSE ALL OPEN WINDOWS BEFORE NEXT SAMPLE IMAGE
+close("*");
+
+
+}// END ACTION
+
+
+  
